@@ -9,6 +9,28 @@ PRICING = {
     "claude-haiku-4-5":  ( 0.80,  4.00),
 }
 
+# In-memory session usage — resets on server restart
+_usage = {
+    "queries":       0,
+    "input_tokens":  0,
+    "output_tokens": 0,
+    "total_cost":    0.0,
+    "by_model": {m: {"queries": 0, "input_tokens": 0, "output_tokens": 0, "total_cost": 0.0}
+                 for m in PRICING},
+}
+
+
+def _record(model: str, input_tokens: int, output_tokens: int, cost: float) -> None:
+    _usage["queries"]       += 1
+    _usage["input_tokens"]  += input_tokens
+    _usage["output_tokens"] += output_tokens
+    _usage["total_cost"]    += cost
+    m = _usage["by_model"][model]
+    m["queries"]       += 1
+    m["input_tokens"]  += input_tokens
+    m["output_tokens"] += output_tokens
+    m["total_cost"]    += cost
+
 
 @app.route("/")
 def index():
@@ -32,13 +54,16 @@ def calculate():
     input_cost  = (input_tokens  / 1_000_000) * in_price
     output_cost = (output_tokens / 1_000_000) * out_price
 
+    total = input_cost + output_cost
+    _record(model, input_tokens, output_tokens, total)
+
     return jsonify({
         "model":              model,
         "input_tokens":       input_tokens,
         "output_tokens":      output_tokens,
         "input_cost":         input_cost,
         "output_cost":        output_cost,
-        "total_cost":         input_cost + output_cost,
+        "total_cost":         total,
         "in_price_per_mtok":  in_price,
         "out_price_per_mtok": out_price,
     })
@@ -65,6 +90,22 @@ def compare():
         })
 
     return jsonify(results)
+
+
+@app.route("/usage", methods=["GET"])
+def usage():
+    return jsonify(_usage)
+
+
+@app.route("/usage/reset", methods=["POST"])
+def usage_reset():
+    _usage["queries"]       = 0
+    _usage["input_tokens"]  = 0
+    _usage["output_tokens"] = 0
+    _usage["total_cost"]    = 0.0
+    for m in _usage["by_model"]:
+        _usage["by_model"][m] = {"queries": 0, "input_tokens": 0, "output_tokens": 0, "total_cost": 0.0}
+    return jsonify({"ok": True})
 
 
 if __name__ == "__main__":

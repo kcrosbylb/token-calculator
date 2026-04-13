@@ -179,6 +179,43 @@
       display: none;
     }
 
+    /* Usage panel */
+    .usage-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 0.75rem;
+      margin-bottom: 1.25rem;
+    }
+    .usage-stat {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.75rem;
+      text-align: center;
+    }
+    .usage-stat .stat-val {
+      font-size: 1.15rem;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      color: var(--accent2);
+    }
+    .usage-stat .stat-lbl {
+      font-size: 0.7rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-top: 0.2rem;
+    }
+    .btn-reset {
+      background: transparent;
+      border: 1px solid #f87171;
+      color: #f87171;
+      margin-top: 0.75rem;
+      font-size: 0.8rem;
+      padding: 0.5rem;
+    }
+    .btn-reset:hover { opacity: 0.75; }
+
     footer {
       margin-top: 2rem;
       color: var(--muted);
@@ -266,6 +303,49 @@
   </table>
 </div>
 
+<!-- Session usage -->
+<div class="card" id="usage-panel">
+  <p class="result-header">Session usage <span style="color:var(--border);font-weight:400;text-transform:none;letter-spacing:0">&nbsp;— resets on server restart</span></p>
+  <div class="usage-grid">
+    <div class="usage-stat">
+      <div class="stat-val" id="u-queries">0</div>
+      <div class="stat-lbl">Queries</div>
+    </div>
+    <div class="usage-stat">
+      <div class="stat-val" id="u-input">0</div>
+      <div class="stat-lbl">Input tokens</div>
+    </div>
+    <div class="usage-stat">
+      <div class="stat-val" id="u-output">0</div>
+      <div class="stat-lbl">Output tokens</div>
+    </div>
+  </div>
+
+  <table class="compare-table" id="usage-table">
+    <thead>
+      <tr>
+        <th>Model</th>
+        <th>Queries</th>
+        <th>Input</th>
+        <th>Output</th>
+        <th>Cost</th>
+      </tr>
+    </thead>
+    <tbody id="usage-body"></tbody>
+    <tfoot>
+      <tr style="border-top:1px solid var(--border)">
+        <td style="padding-top:0.6rem;font-weight:700">Total</td>
+        <td></td>
+        <td></td>
+        <td></td>
+        <td style="text-align:right;font-weight:700;color:var(--green);padding-top:0.6rem;font-variant-numeric:tabular-nums" id="u-total-cost">$0.000000</td>
+      </tr>
+    </tfoot>
+  </table>
+
+  <button class="btn-outline btn-reset" id="reset-btn">Reset session</button>
+</div>
+
 <footer>
   Prices sourced from <a href="https://www.anthropic.com/pricing" target="_blank">anthropic.com/pricing</a> — verify for accuracy.
 </footer>
@@ -314,7 +394,37 @@
     document.getElementById('r-total').textContent         = fmt(data.total_cost);
     document.getElementById('result').style.display        = 'block';
     document.getElementById('compare-section').style.display = 'none';
+    refreshUsage();
   });
+
+  async function refreshUsage() {
+    const res = await fetch('/usage');
+    const d = await res.json();
+
+    document.getElementById('u-queries').textContent = d.queries.toLocaleString();
+    document.getElementById('u-input').textContent   = d.input_tokens.toLocaleString();
+    document.getElementById('u-output').textContent  = d.output_tokens.toLocaleString();
+    document.getElementById('u-total-cost').textContent = fmt(d.total_cost);
+
+    document.getElementById('usage-body').innerHTML = Object.entries(d.by_model)
+      .filter(([, v]) => v.queries > 0)
+      .map(([model, v]) => `
+        <tr>
+          <td class="model-name">${model}</td>
+          <td style="text-align:right">${v.queries.toLocaleString()}</td>
+          <td style="text-align:right;font-variant-numeric:tabular-nums">${v.input_tokens.toLocaleString()}</td>
+          <td style="text-align:right;font-variant-numeric:tabular-nums">${v.output_tokens.toLocaleString()}</td>
+          <td style="text-align:right;font-variant-numeric:tabular-nums">${fmt(v.total_cost)}</td>
+        </tr>`)
+      .join('') || `<tr><td colspan="5" style="color:var(--muted);padding:0.5rem 0">No queries yet.</td></tr>`;
+  }
+
+  document.getElementById('reset-btn').addEventListener('click', async () => {
+    await fetch('/usage/reset', { method: 'POST' });
+    refreshUsage();
+  });
+
+  refreshUsage();
 
   document.getElementById('compare-btn').addEventListener('click', async () => {
     clearError();
