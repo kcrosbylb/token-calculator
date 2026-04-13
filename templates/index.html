@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Anthropic Token Cost Calculator</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #0f1117;
+      --surface:   #1a1d27;
+      --border:    #2a2d3e;
+      --accent:    #d97757;
+      --accent2:   #7c6af5;
+      --text:      #e8eaf0;
+      --muted:     #8b8fa8;
+      --green:     #4ade80;
+      --radius:    10px;
+      --font:      'Inter', system-ui, -apple-system, sans-serif;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 2rem 1rem;
+    }
+
+    header {
+      text-align: center;
+      margin-bottom: 2.5rem;
+    }
+    header h1 {
+      font-size: 1.75rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+    header h1 span { color: var(--accent); }
+    header p {
+      color: var(--muted);
+      margin-top: 0.4rem;
+      font-size: 0.9rem;
+    }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.75rem;
+      width: 100%;
+      max-width: 540px;
+    }
+
+    .card + .card { margin-top: 1.25rem; }
+
+    label {
+      display: block;
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 0.4rem;
+    }
+
+    select, input[type="number"] {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      font-size: 1rem;
+      padding: 0.6rem 0.8rem;
+      outline: none;
+      transition: border-color 0.15s;
+      -moz-appearance: textfield;
+    }
+    select:focus, input[type="number"]:focus {
+      border-color: var(--accent);
+    }
+    input[type="number"]::-webkit-inner-spin-button { display: none; }
+
+    .row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+      margin-top: 1rem;
+    }
+
+    .field { margin-top: 1rem; }
+    .field:first-child { margin-top: 0; }
+
+    button {
+      margin-top: 1.4rem;
+      width: 100%;
+      padding: 0.75rem;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.15s;
+    }
+    button:hover { opacity: 0.88; }
+
+    .btn-outline {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      margin-top: 0.75rem;
+      font-size: 0.875rem;
+    }
+    .btn-outline:hover { border-color: var(--accent2); color: var(--accent2); opacity: 1; }
+
+    /* Result card */
+    #result { display: none; }
+
+    .result-header {
+      font-size: 0.75rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-bottom: 1rem;
+      font-weight: 600;
+    }
+
+    .breakdown {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.9rem;
+    }
+    .breakdown td { padding: 0.45rem 0; }
+    .breakdown td:last-child { text-align: right; font-variant-numeric: tabular-nums; }
+    .breakdown .divider td {
+      border-top: 1px solid var(--border);
+      padding-top: 0.65rem;
+    }
+    .breakdown .total td { font-weight: 700; font-size: 1rem; color: var(--green); }
+    .label-muted { color: var(--muted); }
+
+    /* Compare table */
+    #compare-section { display: none; }
+
+    .compare-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.875rem;
+    }
+    .compare-table th {
+      text-align: left;
+      color: var(--muted);
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      padding-bottom: 0.6rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .compare-table th:not(:first-child) { text-align: right; }
+    .compare-table td { padding: 0.5rem 0; }
+    .compare-table td:not(:first-child) {
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+    .compare-table tr + tr td { border-top: 1px solid var(--border); }
+    .compare-table .best td { color: var(--green); font-weight: 600; }
+    .model-name { font-weight: 500; }
+
+    .error-msg {
+      color: #f87171;
+      font-size: 0.875rem;
+      margin-top: 0.75rem;
+      display: none;
+    }
+
+    footer {
+      margin-top: 2rem;
+      color: var(--muted);
+      font-size: 0.75rem;
+      text-align: center;
+    }
+    footer a { color: var(--muted); }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>Token Cost <span>Calculator</span></h1>
+  <p>Estimate Anthropic API cost per query in USD</p>
+</header>
+
+<div class="card">
+  <div class="field">
+    <label for="model">Model</label>
+    <select id="model">
+      {% for m in models %}
+      <option value="{{ m }}">{{ m }}</option>
+      {% endfor %}
+    </select>
+  </div>
+
+  <div class="row">
+    <div class="field">
+      <label for="input_tokens">Input tokens</label>
+      <input type="number" id="input_tokens" placeholder="e.g. 1000" min="0" />
+    </div>
+    <div class="field">
+      <label for="output_tokens">Output tokens</label>
+      <input type="number" id="output_tokens" placeholder="e.g. 500" min="0" />
+    </div>
+  </div>
+
+  <p class="error-msg" id="error"></p>
+  <button id="calc-btn">Calculate</button>
+  <button class="btn-outline" id="compare-btn">Compare all models</button>
+</div>
+
+<!-- Single model result -->
+<div class="card" id="result">
+  <p class="result-header" id="result-model"></p>
+  <table class="breakdown">
+    <tbody>
+      <tr>
+        <td class="label-muted">Input tokens</td>
+        <td id="r-input-tokens"></td>
+      </tr>
+      <tr>
+        <td class="label-muted">Output tokens</td>
+        <td id="r-output-tokens"></td>
+      </tr>
+      <tr>
+        <td class="label-muted">Input cost</td>
+        <td id="r-input-cost"></td>
+      </tr>
+      <tr>
+        <td class="label-muted">Output cost</td>
+        <td id="r-output-cost"></td>
+      </tr>
+      <tr class="divider total">
+        <td>Total cost</td>
+        <td id="r-total"></td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- All-model comparison -->
+<div class="card" id="compare-section">
+  <p class="result-header">All models — side by side</p>
+  <table class="compare-table">
+    <thead>
+      <tr>
+        <th>Model</th>
+        <th>Input</th>
+        <th>Output</th>
+        <th>Total</th>
+      </tr>
+    </thead>
+    <tbody id="compare-body"></tbody>
+  </table>
+</div>
+
+<footer>
+  Prices sourced from <a href="https://www.anthropic.com/pricing" target="_blank">anthropic.com/pricing</a> — verify for accuracy.
+</footer>
+
+<script>
+  const fmt = (n) => '$' + n.toFixed(6);
+  const fmtN = (n) => n.toLocaleString();
+
+  function showError(msg) {
+    const el = document.getElementById('error');
+    el.textContent = msg;
+    el.style.display = 'block';
+  }
+  function clearError() {
+    document.getElementById('error').style.display = 'none';
+  }
+
+  function getInputs() {
+    const model = document.getElementById('model').value;
+    const input_tokens = parseInt(document.getElementById('input_tokens').value) || 0;
+    const output_tokens = parseInt(document.getElementById('output_tokens').value) || 0;
+    return { model, input_tokens, output_tokens };
+  }
+
+  document.getElementById('calc-btn').addEventListener('click', async () => {
+    clearError();
+    const body = getInputs();
+    if (body.input_tokens === 0 && body.output_tokens === 0) {
+      showError('Enter at least one token count.');
+      return;
+    }
+    const res = await fetch('/calculate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (data.error) { showError(data.error); return; }
+
+    document.getElementById('result-model').textContent =
+      data.model + '  ·  $' + data.in_price_per_mtok.toFixed(2) + ' / $' + data.out_price_per_mtok.toFixed(2) + ' per MTok';
+    document.getElementById('r-input-tokens').textContent  = fmtN(data.input_tokens);
+    document.getElementById('r-output-tokens').textContent = fmtN(data.output_tokens);
+    document.getElementById('r-input-cost').textContent    = fmt(data.input_cost);
+    document.getElementById('r-output-cost').textContent   = fmt(data.output_cost);
+    document.getElementById('r-total').textContent         = fmt(data.total_cost);
+    document.getElementById('result').style.display        = 'block';
+    document.getElementById('compare-section').style.display = 'none';
+  });
+
+  document.getElementById('compare-btn').addEventListener('click', async () => {
+    clearError();
+    const { model, input_tokens, output_tokens } = getInputs();
+    if (input_tokens === 0 && output_tokens === 0) {
+      showError('Enter at least one token count.');
+      return;
+    }
+    const res = await fetch('/compare', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ input_tokens, output_tokens }),
+    });
+    const rows = await res.json();
+    if (rows.error) { showError(rows.error); return; }
+
+    const minTotal = Math.min(...rows.map(r => r.total_cost));
+    const tbody = document.getElementById('compare-body');
+    tbody.innerHTML = rows.map(r => `
+      <tr class="${r.total_cost === minTotal ? 'best' : ''}">
+        <td class="model-name">${r.model}</td>
+        <td>${fmt(r.input_cost)}</td>
+        <td>${fmt(r.output_cost)}</td>
+        <td>${fmt(r.total_cost)}</td>
+      </tr>
+    `).join('');
+
+    document.getElementById('compare-section').style.display = 'block';
+    document.getElementById('result').style.display = 'none';
+  });
+</script>
+</body>
+</html>
