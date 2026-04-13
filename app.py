@@ -13,7 +13,7 @@ PRICING = {
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "usage.db")
 
-# In-memory session counters — resets on server restart
+# In-memory session counters — resets on server restart, tracks ALL calls
 _session = {
     "queries":       0,
     "input_tokens":  0,
@@ -24,13 +24,13 @@ _session = {
 }
 
 
-# ── SQLite helpers ────────────────────────────────────────────────────────────
+# ── SQLite ────────────────────────────────────────────────────────────────────
 
 def get_db() -> sqlite3.Connection:
-    """Return a per-request SQLite connection (stored on Flask's g)."""
     if "db" not in g:
-        g.db = sqlite3.connect(DB_PATH)
-        g.db.row_factory = sqlite3.Row
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        g.db = conn
     return g.db
 
 
@@ -43,6 +43,8 @@ def close_db(exc):
 
 def init_db() -> None:
     with sqlite3.connect(DB_PATH) as conn:
+        # WAL mode: writes survive crashes; readers never block writers
+        conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS queries (
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -52,10 +54,16 @@ def init_db() -> None:
                 input_cost    REAL    NOT NULL,
                 output_cost   REAL    NOT NULL,
                 total_cost    REAL    NOT NULL,
+                -- 'api'    = real usage ingested from response.usage (counted in daily log)
+                -- 'manual' = manual estimate entered via the calculator UI
+                source        TEXT    NOT NULL DEFAULT 'manual',
                 queried_at    TEXT    NOT NULL
                                 DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now'))
             )
         """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_queried_at ON queries (queried_at)"
+        )
         conn.commit()
 
 
@@ -65,8 +73,9 @@ init_db()
 # ── Recording ─────────────────────────────────────────────────────────────────
 
 def _record(model: str, input_tokens: int, output_tokens: int,
-            input_cost: float, output_cost: float, total: float) -> None:
-    # In-memory session
+            input_cost: float, output_cost: float, total: float,
+            source: str = "manual") -> None:
+    # Session counters (all sources)
     _session["queries"]       += 1
     _session["input_tokens"]  += input_tokens
     _session["output_tokens"] += output_tokens
@@ -77,12 +86,13 @@ def _record(model: str, input_tokens: int, output_tokens: int,
     m["output_tokens"] += output_tokens
     m["total_cost"]    += total
 
-    # Persistent DB
+    # Durable write — WAL ensures this survives a crash
     db = get_db()
     db.execute(
-        "INSERT INTO queries (model, input_tokens, output_tokens, input_cost, output_cost, total_cost) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (model, input_tokens, output_tokens, input_cost, output_cost, total),
+        "INSERT INTO queries "
+        "(model, input_tokens, output_tokens, input_cost, output_cost, total_cost, source) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (model, input_tokens, output_tokens, input_cost, output_cost, total, source),
     )
     db.commit()
 
@@ -96,6 +106,7 @@ def index():
 
 @app.route("/calculate", methods=["POST"])
 def calculate():
+    """Manual estimate — logged as source='manual', not counted in daily API log."""
     data = request.get_json()
     model = data.get("model", "")
     try:
@@ -112,7 +123,7 @@ def calculate():
     output_cost = (output_tokens / 1_000_000) * out_price
     total       = input_cost + output_cost
 
-    _record(model, input_tokens, output_tokens, input_cost, output_cost, total)
+    _record(model, input_tokens, output_tokens, input_cost, output_cost, total, source="manual")
 
     return jsonify({
         "model":              model,
@@ -123,6 +134,42 @@ def calculate():
         "total_cost":         total,
         "in_price_per_mtok":  in_price,
         "out_price_per_mtok": out_price,
+    })
+
+
+@app.route("/ingest", methods=["POST"])
+def ingest():
+    """
+    Real API usage endpoint. Call this with the exact values from response.usage
+    after every Anthropic API call. These are the only rows counted in the
+    daily history — guaranteed to reflect actual token consumption.
+
+    POST body: { "model": "claude-sonnet-4-6", "input_tokens": N, "output_tokens": N }
+    """
+    data = request.get_json()
+    model = data.get("model", "")
+    try:
+        input_tokens  = int(data.get("input_tokens",  0))
+        output_tokens = int(data.get("output_tokens", 0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Token counts must be integers."}), 400
+
+    if model not in PRICING:
+        return jsonify({"error": f"Unknown model '{model}'. Known: {list(PRICING)}"}), 400
+
+    in_price, out_price = PRICING[model]
+    input_cost  = (input_tokens  / 1_000_000) * in_price
+    output_cost = (output_tokens / 1_000_000) * out_price
+    total       = input_cost + output_cost
+
+    _record(model, input_tokens, output_tokens, input_cost, output_cost, total, source="api")
+
+    return jsonify({
+        "logged":        True,
+        "model":         model,
+        "input_tokens":  input_tokens,
+        "output_tokens": output_tokens,
+        "total_cost":    total,
     })
 
 
@@ -153,9 +200,10 @@ def compare():
 def usage():
     db = get_db()
 
-    # All-time totals from DB
+    # All-time totals (API only — real usage)
     row = db.execute(
-        "SELECT count(*) q, sum(input_tokens) i, sum(output_tokens) o, sum(total_cost) c FROM queries"
+        "SELECT count(*) q, sum(input_tokens) i, sum(output_tokens) o, sum(total_cost) c "
+        "FROM queries WHERE source='api'"
     ).fetchone()
     alltime = {
         "queries":       row["q"] or 0,
@@ -164,26 +212,15 @@ def usage():
         "total_cost":    row["c"] or 0.0,
     }
 
-    # All-time by model
-    by_model_rows = db.execute(
-        "SELECT model, count(*) q, sum(input_tokens) i, sum(output_tokens) o, sum(total_cost) c "
-        "FROM queries GROUP BY model"
-    ).fetchall()
-    alltime_by_model = {
-        r["model"]: {
-            "queries":       r["q"],
-            "input_tokens":  r["i"],
-            "output_tokens": r["o"],
-            "total_cost":    r["c"],
-        }
-        for r in by_model_rows
-    }
-
-    # Daily breakdown — last 30 days
+    # Daily breakdown — last 30 days, API calls only
     daily_rows = db.execute(
-        "SELECT date(queried_at) day, count(*) q, "
-        "sum(input_tokens) i, sum(output_tokens) o, sum(total_cost) c "
+        "SELECT date(queried_at) day, "
+        "  count(*) api_calls, "
+        "  sum(input_tokens) i, "
+        "  sum(output_tokens) o, "
+        "  sum(total_cost) c "
         "FROM queries "
+        "WHERE source='api' "
         "GROUP BY date(queried_at) "
         "ORDER BY day DESC "
         "LIMIT 30"
@@ -191,7 +228,7 @@ def usage():
     daily = [
         {
             "date":          r["day"],
-            "queries":       r["q"],
+            "api_calls":     r["api_calls"],
             "input_tokens":  r["i"],
             "output_tokens": r["o"],
             "total_cost":    r["c"],
@@ -200,16 +237,15 @@ def usage():
     ]
 
     return jsonify({
-        "session":          _session,
-        "alltime":          alltime,
-        "alltime_by_model": alltime_by_model,
-        "daily":            daily,
+        "session": _session,
+        "alltime": alltime,
+        "daily":   daily,
     })
 
 
 @app.route("/usage/reset", methods=["POST"])
 def usage_reset():
-    """Resets the in-memory session counters only. DB history is preserved."""
+    """Resets in-memory session counters only. DB history is never deleted."""
     _session["queries"]       = 0
     _session["input_tokens"]  = 0
     _session["output_tokens"] = 0

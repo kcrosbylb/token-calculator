@@ -326,19 +326,22 @@
 
 <!-- Daily history -->
 <div class="card" id="daily-panel">
-  <p class="result-header">Daily history <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0">&nbsp;— last 30 days · stored in SQLite</span></p>
+  <p class="result-header">
+    Real API usage
+    <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0">&nbsp;— last 30 days · only calls ingested via <code style="font-size:0.75rem;color:var(--accent)">/ingest</code> · persisted in SQLite</span>
+  </p>
   <table class="daily-table">
     <thead>
       <tr>
         <th>Date</th>
-        <th>Queries</th>
-        <th>Input tkns</th>
-        <th>Output tkns</th>
+        <th>API calls</th>
+        <th>Input tokens</th>
+        <th>Output tokens</th>
         <th>Cost</th>
       </tr>
     </thead>
     <tbody id="daily-body">
-      <tr><td colspan="5" style="color:var(--muted);padding:0.5rem 0">No history yet.</td></tr>
+      <tr><td colspan="5" style="color:var(--muted);padding:0.5rem 0">No real API calls logged yet. Use <code>/ingest</code> from your code.</td></tr>
     </tbody>
   </table>
 </div>
@@ -462,17 +465,17 @@
         </tr>`)
       .join('') || `<tr><td colspan="5" style="color:var(--muted);padding:0.5rem 0">No queries this session.</td></tr>`;
 
-    // Daily history panel
+    // Daily history panel — real API calls only
     document.getElementById('daily-body').innerHTML = d.daily.length
       ? d.daily.map(r => `
           <tr class="${r.date === today ? 'today-row' : ''}">
-            <td>${r.date}${r.date === today ? ' <span style="font-size:0.7rem;color:var(--accent2)">(today)</span>' : ''}</td>
-            <td>${r.queries.toLocaleString()}</td>
+            <td>${r.date}${r.date === today ? '&nbsp;<span style="font-size:0.7rem;color:var(--accent2)">(today)</span>' : ''}</td>
+            <td>${r.api_calls.toLocaleString()}</td>
             <td>${r.input_tokens.toLocaleString()}</td>
             <td>${r.output_tokens.toLocaleString()}</td>
             <td>${fmt(r.total_cost)}</td>
           </tr>`).join('')
-      : `<tr><td colspan="5" style="color:var(--muted);padding:0.5rem 0">No history yet.</td></tr>`;
+      : `<tr><td colspan="5" style="color:var(--muted);padding:0.5rem 0">No real API calls logged yet. Use <code>/ingest</code> from your code.</td></tr>`;
   }
 
   document.getElementById('reset-btn').addEventListener('click', async () => {
