@@ -22,6 +22,11 @@ instance/
 .DS_Store
 Thumbs.db
 
+# SQLite DB (runtime data, not source)
+*.db
+*.db-shm
+*.db-wal
+
 # Editor
 .vscode/
 .idea/

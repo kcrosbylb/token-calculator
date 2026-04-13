@@ -1,4 +1,6 @@
-from flask import Flask, render_template, request, jsonify
+import os
+import sqlite3
+from flask import Flask, render_template, request, jsonify, g
 
 app = Flask(__name__)
 
@@ -9,8 +11,10 @@ PRICING = {
     "claude-haiku-4-5":  ( 0.80,  4.00),
 }
 
-# In-memory session usage — resets on server restart
-_usage = {
+DB_PATH = os.path.join(os.path.dirname(__file__), "usage.db")
+
+# In-memory session counters — resets on server restart
+_session = {
     "queries":       0,
     "input_tokens":  0,
     "output_tokens": 0,
@@ -20,17 +24,70 @@ _usage = {
 }
 
 
-def _record(model: str, input_tokens: int, output_tokens: int, cost: float) -> None:
-    _usage["queries"]       += 1
-    _usage["input_tokens"]  += input_tokens
-    _usage["output_tokens"] += output_tokens
-    _usage["total_cost"]    += cost
-    m = _usage["by_model"][model]
+# ── SQLite helpers ────────────────────────────────────────────────────────────
+
+def get_db() -> sqlite3.Connection:
+    """Return a per-request SQLite connection (stored on Flask's g)."""
+    if "db" not in g:
+        g.db = sqlite3.connect(DB_PATH)
+        g.db.row_factory = sqlite3.Row
+    return g.db
+
+
+@app.teardown_appcontext
+def close_db(exc):
+    db = g.pop("db", None)
+    if db is not None:
+        db.close()
+
+
+def init_db() -> None:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS queries (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                model         TEXT    NOT NULL,
+                input_tokens  INTEGER NOT NULL,
+                output_tokens INTEGER NOT NULL,
+                input_cost    REAL    NOT NULL,
+                output_cost   REAL    NOT NULL,
+                total_cost    REAL    NOT NULL,
+                queried_at    TEXT    NOT NULL
+                                DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now'))
+            )
+        """)
+        conn.commit()
+
+
+init_db()
+
+
+# ── Recording ─────────────────────────────────────────────────────────────────
+
+def _record(model: str, input_tokens: int, output_tokens: int,
+            input_cost: float, output_cost: float, total: float) -> None:
+    # In-memory session
+    _session["queries"]       += 1
+    _session["input_tokens"]  += input_tokens
+    _session["output_tokens"] += output_tokens
+    _session["total_cost"]    += total
+    m = _session["by_model"][model]
     m["queries"]       += 1
     m["input_tokens"]  += input_tokens
     m["output_tokens"] += output_tokens
-    m["total_cost"]    += cost
+    m["total_cost"]    += total
 
+    # Persistent DB
+    db = get_db()
+    db.execute(
+        "INSERT INTO queries (model, input_tokens, output_tokens, input_cost, output_cost, total_cost) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (model, input_tokens, output_tokens, input_cost, output_cost, total),
+    )
+    db.commit()
+
+
+# ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.route("/")
 def index():
@@ -53,9 +110,9 @@ def calculate():
     in_price, out_price = PRICING[model]
     input_cost  = (input_tokens  / 1_000_000) * in_price
     output_cost = (output_tokens / 1_000_000) * out_price
+    total       = input_cost + output_cost
 
-    total = input_cost + output_cost
-    _record(model, input_tokens, output_tokens, total)
+    _record(model, input_tokens, output_tokens, input_cost, output_cost, total)
 
     return jsonify({
         "model":              model,
@@ -83,10 +140,10 @@ def compare():
         input_cost  = (input_tokens  / 1_000_000) * in_price
         output_cost = (output_tokens / 1_000_000) * out_price
         results.append({
-            "model":        model,
-            "input_cost":   input_cost,
-            "output_cost":  output_cost,
-            "total_cost":   input_cost + output_cost,
+            "model":       model,
+            "input_cost":  input_cost,
+            "output_cost": output_cost,
+            "total_cost":  input_cost + output_cost,
         })
 
     return jsonify(results)
@@ -94,17 +151,71 @@ def compare():
 
 @app.route("/usage", methods=["GET"])
 def usage():
-    return jsonify(_usage)
+    db = get_db()
+
+    # All-time totals from DB
+    row = db.execute(
+        "SELECT count(*) q, sum(input_tokens) i, sum(output_tokens) o, sum(total_cost) c FROM queries"
+    ).fetchone()
+    alltime = {
+        "queries":       row["q"] or 0,
+        "input_tokens":  row["i"] or 0,
+        "output_tokens": row["o"] or 0,
+        "total_cost":    row["c"] or 0.0,
+    }
+
+    # All-time by model
+    by_model_rows = db.execute(
+        "SELECT model, count(*) q, sum(input_tokens) i, sum(output_tokens) o, sum(total_cost) c "
+        "FROM queries GROUP BY model"
+    ).fetchall()
+    alltime_by_model = {
+        r["model"]: {
+            "queries":       r["q"],
+            "input_tokens":  r["i"],
+            "output_tokens": r["o"],
+            "total_cost":    r["c"],
+        }
+        for r in by_model_rows
+    }
+
+    # Daily breakdown — last 30 days
+    daily_rows = db.execute(
+        "SELECT date(queried_at) day, count(*) q, "
+        "sum(input_tokens) i, sum(output_tokens) o, sum(total_cost) c "
+        "FROM queries "
+        "GROUP BY date(queried_at) "
+        "ORDER BY day DESC "
+        "LIMIT 30"
+    ).fetchall()
+    daily = [
+        {
+            "date":          r["day"],
+            "queries":       r["q"],
+            "input_tokens":  r["i"],
+            "output_tokens": r["o"],
+            "total_cost":    r["c"],
+        }
+        for r in daily_rows
+    ]
+
+    return jsonify({
+        "session":          _session,
+        "alltime":          alltime,
+        "alltime_by_model": alltime_by_model,
+        "daily":            daily,
+    })
 
 
 @app.route("/usage/reset", methods=["POST"])
 def usage_reset():
-    _usage["queries"]       = 0
-    _usage["input_tokens"]  = 0
-    _usage["output_tokens"] = 0
-    _usage["total_cost"]    = 0.0
-    for m in _usage["by_model"]:
-        _usage["by_model"][m] = {"queries": 0, "input_tokens": 0, "output_tokens": 0, "total_cost": 0.0}
+    """Resets the in-memory session counters only. DB history is preserved."""
+    _session["queries"]       = 0
+    _session["input_tokens"]  = 0
+    _session["output_tokens"] = 0
+    _session["total_cost"]    = 0.0
+    for m in _session["by_model"]:
+        _session["by_model"][m] = {"queries": 0, "input_tokens": 0, "output_tokens": 0, "total_cost": 0.0}
     return jsonify({"ok": True})
 
 
